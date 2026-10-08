@@ -65,8 +65,11 @@ $events |
                 os.remove(script_path)
 
         if result.returncode != 0:
-            print("[ARGUS ERROR] PowerShell failed.")
-            print(result.stderr.strip())
+            err_msg = result.stderr.strip()
+            if "NoMatchingLogsFound" in err_msg or "matches" in err_msg:
+                # Sysmon not installed on host
+                return []
+            print("[ARGUS ERROR] PowerShell Sysmon query failed:", err_msg)
             return []
 
         output = result.stdout.strip()

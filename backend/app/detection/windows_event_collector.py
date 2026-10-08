@@ -90,11 +90,6 @@ catch {{
         # -------------------------------------------------
 
         if "ARGUS_NO_EVENTS" in output:
-
-            print(
-                "[ARGUS] No failed-login events found."
-            )
-
             return []
 
 
@@ -121,11 +116,6 @@ catch {{
         # -------------------------------------------------
 
         if not output:
-
-            print(
-                "[ARGUS] No failed-login events found."
-            )
-
             return []
 
 
@@ -179,5 +169,49 @@ catch {{
             f"{len(data)} failed-login event(s)."
         )
 
+
+        return data
+
+    # =====================================================
+    # GET POWERSHELL SCRIPTBLOCK EVENTS
+    # Windows PowerShell Operational Event ID 4104
+    # =====================================================
+
+    def get_powershell_events(self, max_events=20):
+        powershell_command = (
+            f"Get-WinEvent -FilterHashtable @{{LogName='Microsoft-Windows-PowerShell/Operational'; Id=4104}} "
+            f"-MaxEvents {max_events} -ErrorAction SilentlyContinue | "
+            f"Select-Object RecordId, TimeCreated, Id, Message | ConvertTo-Json -Compress"
+        )
+        command = [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            powershell_command
+        ]
+
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=15
+            )
+        except subprocess.TimeoutExpired:
+            return []
+
+        output = result.stdout.strip()
+        if not output:
+            return []
+
+        try:
+            data = json.loads(output)
+        except Exception:
+            return []
+
+        if isinstance(data, dict):
+            data = [data]
 
         return data

@@ -40,6 +40,11 @@ import uvicorn
 from app.detection.network_detection_engine import NetworkDetectionEngine
 from app.detection.windows_detection_engine import WindowsDetectionEngine
 from app.detection.alert_manager import AlertManager
+from app.detection.powershell_detector import PowerShellDetector
+from app.detection.sysmon_event_collector import SysmonEventCollector
+from app.detection.sysmon_event_parser import SysmonEventParser
+from app.detection.suspicious_process_detector import SuspiciousProcessDetector
+import re
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Global State
@@ -256,6 +261,14 @@ class InstrumentedNetworkEngine(NetworkDetectionEngine):
 class InstrumentedWindowsEngine(WindowsDetectionEngine):
     """Windows engine that also pushes data to the global state."""
 
+    def __init__(self, failure_threshold=5, time_window_seconds=60):
+        super().__init__(failure_threshold, time_window_seconds)
+        self.powershell_detector = PowerShellDetector()
+        self.sysmon_collector = SysmonEventCollector()
+        self.sysmon_parser = SysmonEventParser()
+        self.sysmon_process_detector = SuspiciousProcessDetector()
+        self.processed_ps_ids = set()
+
     def process_event(self, event):
         result = super().process_event(event)
         if result and result.get("alert"):
@@ -282,6 +295,94 @@ class InstrumentedWindowsEngine(WindowsDetectionEngine):
             }
             push_alert(alert_rec)
         return result
+
+    def scan_once(self):
+        # 1. Scan failed logins (Event 4625)
+        fl_count = super().scan_once()
+
+        # 2. Scan PowerShell scriptblock logs (Event 4104)
+        try:
+            ps_events = self.collector.get_powershell_events(max_events=20)
+            for ev in ps_events:
+                rec_id = ev.get("RecordId")
+                if rec_id and rec_id in self.processed_ps_ids:
+                    continue
+                if rec_id:
+                    self.processed_ps_ids.add(rec_id)
+
+                msg = ev.get("Message", "")
+                m = re.search(r"Creating Scriptblock text \(\d+ of \d+\):\s*(.*?)(?:\r?\n\r?\nScriptBlock ID:|$)", msg, re.DOTALL)
+                cmdline = m.group(1).strip() if m else msg
+
+                ps_result = self.powershell_detector.process_event({
+                    "image": "powershell.exe",
+                    "command_line": cmdline,
+                    "timestamp": ev.get("TimeCreated"),
+                })
+
+                if ps_result.get("alert"):
+                    with STATS_LOCK:
+                        STATS["windows_alerts"] += 1
+                    aid = f"PS-{int(time.time()*1000)}"
+                    alert_rec = {
+                        "id": aid,
+                        "alert_id": aid,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "type": "SUSPICIOUS_POWERSHELL",
+                        "alert_type": "Suspicious PowerShell Command",
+                        "title": f"Suspicious PowerShell Execution ({ps_result.get('severity')})",
+                        "detector": "powershell_detector",
+                        "severity": ps_result.get("severity", "HIGH"),
+                        "risk_score": ps_result.get("risk_score", 70),
+                        "source_ip": "127.0.0.1",
+                        "target_ip": "localhost",
+                        "user": ps_result.get("user", "System"),
+                        "process_name": "powershell.exe",
+                        "command_line": cmdline[:500],
+                        "reasons": ps_result.get("reasons", []),
+                        "description": f"Suspicious PowerShell command executed: {cmdline[:200]}. Reasons: {', '.join(ps_result.get('reasons', []))}",
+                        "status": "UNACKNOWLEDGED",
+                    }
+                    push_alert(alert_rec)
+        except Exception as e:
+            pass
+
+        # 3. Scan Sysmon process creation if available (Event 1)
+        try:
+            sys_events = self.sysmon_collector.get_process_events(max_events=20)
+            for ev in sys_events:
+                parsed = self.sysmon_parser.parse(ev)
+                if not parsed:
+                    continue
+                proc_res = self.sysmon_process_detector.process_event(parsed)
+                if proc_res.get("alert"):
+                    with STATS_LOCK:
+                        STATS["windows_alerts"] += 1
+                    aid = f"SYS-{int(time.time()*1000)}"
+                    alert_rec = {
+                        "id": aid,
+                        "alert_id": aid,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "type": "SUSPICIOUS_PROCESS",
+                        "alert_type": "Suspicious Process Execution",
+                        "title": f"Suspicious Process {proc_res.get('process_name')}",
+                        "detector": "process_detector",
+                        "severity": proc_res.get("severity", "HIGH"),
+                        "risk_score": proc_res.get("risk_score", 75),
+                        "source_ip": "127.0.0.1",
+                        "target_ip": "localhost",
+                        "user": proc_res.get("user"),
+                        "process_name": proc_res.get("process_name"),
+                        "image": proc_res.get("image"),
+                        "command_line": proc_res.get("command_line"),
+                        "description": f"Suspicious process execution detected: {proc_res.get('image')}. Reasons: {', '.join(proc_res.get('reasons', []))}",
+                        "status": "UNACKNOWLEDGED",
+                    }
+                    push_alert(alert_rec)
+        except Exception:
+            pass
+
+        return fl_count
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -161,31 +161,11 @@ class WindowsDetectionEngine:
     # =====================================================
 
     def scan_once(self):
-
-        print()
-        print(
-            "[ARGUS] Scanning Windows Security log..."
-        )
-
-        events = (
-            self.collector
-            .get_failed_login_events(
-                max_events=50
-            )
-        )
-
-        print(
-            "[ARGUS] Events retrieved:",
-            len(events)
-        )
-
-        for event in events:
-
-            self.process_event(
-                event
-            )
-
-
+        events = self.collector.get_failed_login_events(max_events=50)
+        if events:
+            print(f"[ARGUS] Windows Security log: {len(events)} event(s) retrieved.")
+            for event in events:
+                self.process_event(event)
         return len(events)
 
 

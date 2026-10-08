@@ -141,44 +141,13 @@ class WindowsSysmonDetectionEngine:
     # =========================================================
 
     def scan_once(self):
-
-        print()
-        print(
-            "[ARGUS] Scanning Sysmon Event ID 1..."
-        )
-
-        events = (
-            self.collector.get_process_events(
-                max_events=50
-            )
-        )
-
-        print(
-            "[ARGUS] Sysmon events retrieved:",
-            len(events)
-        )
-
+        events = self.collector.get_process_events(max_events=50)
         total_alerts = 0
-
-        # -----------------------------------------------------
-        # Process events
-        # -----------------------------------------------------
-
-        for event in events:
-
-            alerts = self.process_event(
-                event
-            )
-
-            total_alerts += len(
-                alerts
-            )
-
-        print(
-            "[ARGUS] Alerts generated in this scan:",
-            total_alerts
-        )
-
+        if events:
+            print(f"[ARGUS] Sysmon: {len(events)} event(s) retrieved.")
+            for event in events:
+                alerts = self.process_event(event)
+                total_alerts += len(alerts)
         return total_alerts
 
     # =========================================================
