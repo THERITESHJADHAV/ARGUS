@@ -693,12 +693,21 @@ async def websocket_endpoint(websocket: WebSocket):
         # Keep alive — listen for client pings
         while True:
             try:
-                msg = await asyncio.wait_for(websocket.receive_text(), timeout=30)
+                msg = await asyncio.wait_for(websocket.receive_text(), timeout=25)
                 if msg == "ping":
                     await websocket.send_text(json.dumps({"type": "pong"}))
             except asyncio.TimeoutError:
-                await websocket.send_text(json.dumps({"type": "heartbeat"}))
-    except (WebSocketDisconnect, Exception):
+                try:
+                    await websocket.send_text(json.dumps({"type": "heartbeat"}))
+                except Exception:
+                    break
+            except (WebSocketDisconnect, asyncio.CancelledError):
+                break
+            except Exception:
+                break
+    except Exception:
+        pass
+    except BaseException:
         pass
     finally:
         async with WS_LOCK:
@@ -708,15 +717,20 @@ async def websocket_endpoint(websocket: WebSocket):
 
 async def broadcast_update(payload: dict):
     """Broadcast update to all connected WebSocket clients."""
-    dead = []
     async with WS_LOCK:
-        for ws in WEBSOCKET_CLIENTS:
+        if not WEBSOCKET_CLIENTS:
+            return
+        dead = []
+        for ws in list(WEBSOCKET_CLIENTS):
             try:
                 await ws.send_text(json.dumps(payload))
             except Exception:
                 dead.append(ws)
+            except BaseException:
+                dead.append(ws)
         for ws in dead:
-            WEBSOCKET_CLIENTS.remove(ws)
+            if ws in WEBSOCKET_CLIENTS:
+                WEBSOCKET_CLIENTS.remove(ws)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

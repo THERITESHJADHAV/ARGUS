@@ -551,9 +551,17 @@
 
     ws = new WebSocket(WS_URL);
 
+    let pingInterval = null;
+
     ws.onopen = () => {
       updateConnectionStatus(true);
       if (wsReconnectTimer) clearTimeout(wsReconnectTimer);
+      if (pingInterval) clearInterval(pingInterval);
+      pingInterval = setInterval(() => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          try { ws.send('ping'); } catch (e) {}
+        }
+      }, 15000);
     };
 
     ws.onmessage = (event) => {
@@ -571,6 +579,7 @@
     };
 
     ws.onclose = () => {
+      if (pingInterval) clearInterval(pingInterval);
       updateConnectionStatus(false);
       wsReconnectTimer = setTimeout(connectWebSocket, 5000);
     };
