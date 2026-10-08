@@ -109,11 +109,12 @@ class InstrumentedNetworkEngine(NetworkDetectionEngine):
         with STATS_LOCK:
             STATS["packets_captured"] += 1
 
-        # Port scan
         src_ip = event.get("source_ip")
         dst_ip = event.get("destination_ip")
         dst_port = event.get("destination_port")
+        proto = event.get("protocol", "?")
 
+        # ── 1. Port Scan Detection ──────────────────────────────
         if dst_port is not None:
             port_result = self.port_scan_detector.process_connection(
                 source_ip=src_ip,
@@ -123,23 +124,29 @@ class InstrumentedNetworkEngine(NetworkDetectionEngine):
             if port_result["alert"]:
                 with STATS_LOCK:
                     STATS["network_alerts"] += 1
+                aid = f"PS-{int(time.time()*1000)}"
                 alert_rec = {
-                    "alert_id": f"PS-{int(time.time()*1000)}",
+                    "id": aid,
+                    "alert_id": aid,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "alert_type": "Port Scanning",
+                    "type": "PORT_SCAN",
+                    "alert_type": "Port Scanning Detected",
+                    "title": f"Port Scan from {src_ip}",
                     "detector": "port_scan",
                     "severity": "HIGH",
                     "risk_score": 80,
                     "source_ip": port_result.get("source_ip"),
+                    "target_ip": dst_ip,
                     "destination_ip": dst_ip,
                     "destination_port": dst_port,
                     "unique_ports": port_result.get("unique_ports"),
                     "unique_hosts": port_result.get("unique_hosts"),
-                    "status": "NEW",
+                    "description": f"Host {src_ip} scanned {port_result.get('unique_ports', '?')} unique ports on {port_result.get('unique_hosts', '?')} hosts within 60s window.",
+                    "status": "UNACKNOWLEDGED",
                 }
                 push_alert(alert_rec)
 
-        # Outbound IOC check
+        # ── 2. Suspicious Outbound IOC Check ────────────────────
         if dst_ip is not None:
             outbound_result = self.outbound_detector.check_connection(
                 source_ip=src_ip,
@@ -149,22 +156,28 @@ class InstrumentedNetworkEngine(NetworkDetectionEngine):
             if outbound_result["alert"]:
                 with STATS_LOCK:
                     STATS["network_alerts"] += 1
+                aid = f"OB-{int(time.time()*1000)}"
                 alert_rec = {
-                    "alert_id": f"OB-{int(time.time()*1000)}",
+                    "id": aid,
+                    "alert_id": aid,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "type": "SUSPICIOUS_OUTBOUND",
                     "alert_type": "Suspicious Outbound Connection",
+                    "title": f"Outbound to Blocked IOC {dst_ip}",
                     "detector": "outbound_detector",
                     "severity": "HIGH",
                     "risk_score": 90,
                     "source_ip": outbound_result.get("source_ip"),
+                    "target_ip": outbound_result.get("destination_ip"),
                     "destination_ip": outbound_result.get("destination_ip"),
                     "destination_port": outbound_result.get("destination_port"),
                     "reason": outbound_result.get("reason"),
-                    "status": "NEW",
+                    "description": f"Outbound connection from {src_ip} to IOC-blocklisted destination {dst_ip}:{dst_port} ({proto}). Reason: {outbound_result.get('reason', 'Destination matched IOC')}.",
+                    "status": "UNACKNOWLEDGED",
                 }
                 push_alert(alert_rec)
 
-        # Flow feature extraction + ML
+        # ── 3. Flow Feature Extraction + ML ─────────────────────
         features = self.flow_extractor.add_packet(event)
         if features is None:
             return
@@ -180,23 +193,30 @@ class InstrumentedNetworkEngine(NetworkDetectionEngine):
         except Exception:
             return
 
+        is_attack = result["prediction"] == "ATTACK"
+
         with STATS_LOCK:
             STATS["ml_predictions"] += 1
-            if result["prediction"] == "ATTACK":
+            if is_attack:
                 STATS["attack_count"] += 1
             else:
                 STATS["benign_count"] += 1
 
-        # Record flow history for chart
+        # Record flow history for real-time charts
         FLOW_HISTORY.append({
+            "timestamp": time.time(),
             "time": datetime.now(timezone.utc).isoformat(),
+            "packets": 1,
+            "flows": 1,
+            "attacks": 1 if is_attack else 0,
             "prediction": result["prediction"],
             "attack_probability": result["attack_probability"],
             "source_ip": src_ip,
             "destination_ip": dst_ip,
         })
 
-        if result["prediction"] == "ATTACK":
+        # ── 4. ML Attack Alert ──────────────────────────────────
+        if is_attack:
             with STATS_LOCK:
                 STATS["network_alerts"] += 1
             attack_prob = result["attack_probability"]
@@ -210,19 +230,25 @@ class InstrumentedNetworkEngine(NetworkDetectionEngine):
                 sev = "MEDIUM"
                 risk = 60
 
+            aid = f"NML-{int(time.time()*1000)}"
             alert_rec = {
-                "alert_id": f"NML-{int(time.time()*1000)}",
+                "id": aid,
+                "alert_id": aid,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
+                "type": "NETWORK_ML_ATTACK",
                 "alert_type": "Network Attack Detected",
+                "title": f"ML Attack Detection ({sev}) — {src_ip} → {dst_ip}",
                 "detector": "network_ml",
                 "severity": sev,
                 "risk_score": risk,
                 "source_ip": src_ip,
+                "target_ip": dst_ip,
                 "destination_ip": dst_ip,
                 "destination_port": dst_port,
                 "attack_probability": round(attack_prob, 4),
                 "confidence": round(result["confidence"], 4),
-                "status": "NEW",
+                "description": f"Random Forest ML classifier detected malicious network flow from {src_ip} to {dst_ip}:{dst_port}. Attack probability: {round(attack_prob*100, 1)}%, confidence: {round(result['confidence']*100, 1)}%.",
+                "status": "UNACKNOWLEDGED",
             }
             push_alert(alert_rec)
 
@@ -235,18 +261,24 @@ class InstrumentedWindowsEngine(WindowsDetectionEngine):
         if result and result.get("alert"):
             with STATS_LOCK:
                 STATS["windows_alerts"] += 1
+            aid = f"WIN-{int(time.time()*1000)}"
             alert_rec = {
-                "alert_id": f"WIN-{int(time.time()*1000)}",
+                "id": aid,
+                "alert_id": aid,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
-                "alert_type": result.get("alert_type", "Windows Alert"),
+                "type": "WINDOWS_BRUTE_FORCE",
+                "alert_type": result.get("alert_type", "Windows Security Alert"),
+                "title": f"Windows Brute Force — {result.get('username', 'Unknown User')}",
                 "detector": "windows_detector",
                 "severity": result.get("severity", "HIGH"),
                 "risk_score": 75,
                 "source_ip": result.get("source_ip"),
+                "target_ip": "localhost",
                 "user": result.get("username"),
                 "failure_count": result.get("failure_count"),
                 "time_window_seconds": result.get("time_window_seconds"),
-                "status": "NEW",
+                "description": f"Detected {result.get('failure_count', '?')} failed login attempts for user '{result.get('username', '?')}' within {result.get('time_window_seconds', 60)}s window (Event ID 4625).",
+                "status": "UNACKNOWLEDGED",
             }
             push_alert(alert_rec)
         return result
