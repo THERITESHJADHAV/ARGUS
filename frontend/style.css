@@ -236,7 +236,15 @@ body::before {
   font-size: 11px;
   color: var(--text-muted);
   margin-top: 8px;
+  transition: all 0.3s ease;
 }
+.conn-status.active,
+.conn-status.connected {
+  border-color: rgba(34, 197, 94, 0.4);
+  background: rgba(34, 197, 94, 0.08);
+  color: #22c55e;
+}
+
 .conn-dot {
   width: 7px;
   height: 7px;
@@ -245,8 +253,17 @@ body::before {
   transition: background var(--dur);
   flex-shrink: 0;
 }
-.conn-dot.connected { background: var(--low); animation: blink 1.4s ease infinite; }
-.conn-dot.error     { background: var(--critical); }
+.conn-dot.active,
+.conn-dot.connected,
+.conn-dot.online {
+  background: #22c55e;
+  box-shadow: 0 0 8px #22c55e;
+  animation: blink 1.4s ease infinite;
+}
+.conn-dot.error,
+.conn-dot.offline {
+  background: var(--critical);
+}
 
 /* ─── Header ─────────────────────────────────────────────────── */
 #header {

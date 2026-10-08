@@ -587,10 +587,14 @@
 
   function updateConnectionStatus(connected) {
     if (dom.connDot) {
-      dom.connDot.className = connected ? 'conn-dot active' : 'conn-dot offline';
+      dom.connDot.className = connected ? 'conn-dot active connected' : 'conn-dot offline';
     }
     if (dom.connLabel) {
       dom.connLabel.textContent = connected ? 'Live WebSocket' : 'Polling Sync';
+    }
+    const container = dom.connDot ? dom.connDot.closest('.conn-status') : null;
+    if (container) {
+      container.className = connected ? 'conn-status active connected' : 'conn-status offline';
     }
   }
 
