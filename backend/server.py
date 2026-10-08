@@ -1,0 +1,702 @@
+"""
+ARGUS Backend API Server
+========================
+FastAPI server exposing REST + WebSocket endpoints for the frontend dashboard.
+
+Run with:
+    python server.py
+or:
+    uvicorn server:app --host 0.0.0.0 --port 8000 --reload
+"""
+
+import sys
+import os
+import asyncio
+import threading
+import time
+import json
+import warnings
+warnings.filterwarnings("ignore")
+
+BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
+if BACKEND_DIR not in sys.path:
+    sys.path.insert(0, BACKEND_DIR)
+
+from pathlib import Path
+from datetime import datetime, timezone
+from collections import deque
+from typing import List, Optional
+
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+import uvicorn
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ARGUS Detection Engine imports
+# ─────────────────────────────────────────────────────────────────────────────
+from app.detection.network_detection_engine import NetworkDetectionEngine
+from app.detection.windows_detection_engine import WindowsDetectionEngine
+from app.detection.alert_manager import AlertManager
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Global State
+# ─────────────────────────────────────────────────────────────────────────────
+
+MODEL_PATH = str(
+    Path(BACKEND_DIR) / "app" / "models" / "argus_network_best_model.joblib"
+)
+
+# Shared alert storage (thread-safe deque, max 500 alerts)
+ALERTS: deque = deque(maxlen=500)
+ALERT_LOCK = threading.Lock()
+
+# Stats counters
+STATS = {
+    "total_alerts": 0,
+    "network_alerts": 0,
+    "windows_alerts": 0,
+    "packets_captured": 0,
+    "flows_analyzed": 0,
+    "ml_predictions": 0,
+    "benign_count": 0,
+    "attack_count": 0,
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0,
+    "info": 0,
+    "detector_status": {
+        "network_ml": "running",
+        "port_scan": "running",
+        "outbound": "running",
+        "windows": "running",
+    },
+    "started_at": datetime.now(timezone.utc).isoformat(),
+}
+STATS_LOCK = threading.Lock()
+
+# Recent flow activity (for live chart)
+FLOW_HISTORY: deque = deque(maxlen=60)
+
+# Active WebSocket connections
+WEBSOCKET_CLIENTS: List[WebSocket] = []
+WS_LOCK = asyncio.Lock()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Patched detection engines that push data to global state
+# ─────────────────────────────────────────────────────────────────────────────
+
+def push_alert(alert_dict: dict):
+    """Add alert to global store and update stats."""
+    with ALERT_LOCK:
+        ALERTS.appendleft(alert_dict)
+
+    with STATS_LOCK:
+        STATS["total_alerts"] += 1
+        sev = alert_dict.get("severity", "info").lower()
+        if sev in STATS:
+            STATS[sev] += 1
+
+
+class InstrumentedNetworkEngine(NetworkDetectionEngine):
+    """Network engine that also pushes data to the global state."""
+
+    def handle_event(self, event):
+        with STATS_LOCK:
+            STATS["packets_captured"] += 1
+
+        # Port scan
+        src_ip = event.get("source_ip")
+        dst_ip = event.get("destination_ip")
+        dst_port = event.get("destination_port")
+
+        if dst_port is not None:
+            port_result = self.port_scan_detector.process_connection(
+                source_ip=src_ip,
+                destination_ip=dst_ip,
+                destination_port=dst_port,
+            )
+            if port_result["alert"]:
+                with STATS_LOCK:
+                    STATS["network_alerts"] += 1
+                alert_rec = {
+                    "alert_id": f"PS-{int(time.time()*1000)}",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "alert_type": "Port Scanning",
+                    "detector": "port_scan",
+                    "severity": "HIGH",
+                    "risk_score": 80,
+                    "source_ip": port_result.get("source_ip"),
+                    "destination_ip": dst_ip,
+                    "destination_port": dst_port,
+                    "unique_ports": port_result.get("unique_ports"),
+                    "unique_hosts": port_result.get("unique_hosts"),
+                    "status": "NEW",
+                }
+                push_alert(alert_rec)
+
+        # Outbound IOC check
+        if dst_ip is not None:
+            outbound_result = self.outbound_detector.check_connection(
+                source_ip=src_ip,
+                destination_ip=dst_ip,
+                destination_port=dst_port,
+            )
+            if outbound_result["alert"]:
+                with STATS_LOCK:
+                    STATS["network_alerts"] += 1
+                alert_rec = {
+                    "alert_id": f"OB-{int(time.time()*1000)}",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "alert_type": "Suspicious Outbound Connection",
+                    "detector": "outbound_detector",
+                    "severity": "HIGH",
+                    "risk_score": 90,
+                    "source_ip": outbound_result.get("source_ip"),
+                    "destination_ip": outbound_result.get("destination_ip"),
+                    "destination_port": outbound_result.get("destination_port"),
+                    "reason": outbound_result.get("reason"),
+                    "status": "NEW",
+                }
+                push_alert(alert_rec)
+
+        # Flow feature extraction + ML
+        features = self.flow_extractor.add_packet(event)
+        if features is None:
+            return
+
+        with STATS_LOCK:
+            STATS["flows_analyzed"] += 1
+
+        import pandas as pd
+        flow_df = pd.DataFrame([features])
+
+        try:
+            result = self.network_detector.predict(flow_df)[0]
+        except Exception:
+            return
+
+        with STATS_LOCK:
+            STATS["ml_predictions"] += 1
+            if result["prediction"] == "ATTACK":
+                STATS["attack_count"] += 1
+            else:
+                STATS["benign_count"] += 1
+
+        # Record flow history for chart
+        FLOW_HISTORY.append({
+            "time": datetime.now(timezone.utc).isoformat(),
+            "prediction": result["prediction"],
+            "attack_probability": result["attack_probability"],
+            "source_ip": src_ip,
+            "destination_ip": dst_ip,
+        })
+
+        if result["prediction"] == "ATTACK":
+            with STATS_LOCK:
+                STATS["network_alerts"] += 1
+            attack_prob = result["attack_probability"]
+            if attack_prob >= 0.95:
+                sev = "CRITICAL"
+                risk = 95
+            elif attack_prob >= 0.80:
+                sev = "HIGH"
+                risk = 80
+            else:
+                sev = "MEDIUM"
+                risk = 60
+
+            alert_rec = {
+                "alert_id": f"NML-{int(time.time()*1000)}",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "alert_type": "Network Attack Detected",
+                "detector": "network_ml",
+                "severity": sev,
+                "risk_score": risk,
+                "source_ip": src_ip,
+                "destination_ip": dst_ip,
+                "destination_port": dst_port,
+                "attack_probability": round(attack_prob, 4),
+                "confidence": round(result["confidence"], 4),
+                "status": "NEW",
+            }
+            push_alert(alert_rec)
+
+
+class InstrumentedWindowsEngine(WindowsDetectionEngine):
+    """Windows engine that also pushes data to the global state."""
+
+    def process_event(self, event):
+        result = super().process_event(event)
+        if result and result.get("alert"):
+            with STATS_LOCK:
+                STATS["windows_alerts"] += 1
+            alert_rec = {
+                "alert_id": f"WIN-{int(time.time()*1000)}",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "alert_type": result.get("alert_type", "Windows Alert"),
+                "detector": "windows_detector",
+                "severity": result.get("severity", "HIGH"),
+                "risk_score": 75,
+                "source_ip": result.get("source_ip"),
+                "user": result.get("username"),
+                "failure_count": result.get("failure_count"),
+                "time_window_seconds": result.get("time_window_seconds"),
+                "status": "NEW",
+            }
+            push_alert(alert_rec)
+        return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Background detection threads
+# ─────────────────────────────────────────────────────────────────────────────
+
+network_engine: Optional[InstrumentedNetworkEngine] = None
+windows_engine: Optional[InstrumentedWindowsEngine] = None
+_network_thread: Optional[threading.Thread] = None
+_windows_thread: Optional[threading.Thread] = None
+
+
+def start_network_detection(interface=None):
+    global network_engine
+    try:
+        network_engine = InstrumentedNetworkEngine(MODEL_PATH)
+        network_engine.start(interface=interface)
+    except Exception as e:
+        with STATS_LOCK:
+            STATS["detector_status"]["network_ml"] = f"error: {e}"
+            STATS["detector_status"]["port_scan"] = "error"
+            STATS["detector_status"]["outbound"] = "error"
+        print(f"[ARGUS] Network detection error: {e}")
+
+
+def start_windows_detection():
+    global windows_engine
+    try:
+        windows_engine = InstrumentedWindowsEngine(
+            failure_threshold=5,
+            time_window_seconds=60,
+        )
+        windows_engine.start(interval_seconds=5)
+    except Exception as e:
+        with STATS_LOCK:
+            STATS["detector_status"]["windows"] = f"error: {e}"
+        print(f"[ARGUS] Windows detection error: {e}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FastAPI app
+# ─────────────────────────────────────────────────────────────────────────────
+
+app = FastAPI(title="ARGUS API", version="1.0.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Serve frontend static files
+FRONTEND_DIR = Path(BACKEND_DIR).parent / "frontend"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REST Endpoints
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/status")
+@app.get("/api/stats")
+async def get_stats():
+    with STATS_LOCK:
+        return dict(STATS)
+
+
+@app.get("/api/alerts")
+async def get_alerts(limit: int = 100, severity: str = None):
+    with ALERT_LOCK:
+        alerts = list(ALERTS)
+    if severity:
+        alerts = [a for a in alerts if a.get("severity", "").upper() == severity.upper()]
+    return alerts[:limit]
+
+
+@app.post("/api/alerts/clear")
+async def clear_alerts():
+    with ALERT_LOCK:
+        ALERTS.clear()
+    with STATS_LOCK:
+        STATS["total_alerts"] = 0
+        STATS["critical"] = 0
+        STATS["high"] = 0
+        STATS["medium"] = 0
+        STATS["low"] = 0
+        STATS["info"] = 0
+        STATS["network_alerts"] = 0
+        STATS["windows_alerts"] = 0
+    return {"status": "ok", "message": "All alerts cleared"}
+
+
+@app.post("/api/alerts/test")
+async def emit_test_alert():
+    test_alert = {
+        "id": f"test-{int(time.time())}",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "severity": "critical",
+        "type": "SIMULATED_TEST_ATTACK",
+        "title": "Simulated ML Threat Detection",
+        "source_ip": "192.168.1.55",
+        "target_ip": "192.168.0.102",
+        "detector": "Network_ML",
+        "description": "Test alert triggered manually from SOC Dashboard to verify real-time pipeline",
+        "status": "UNACKNOWLEDGED",
+    }
+    push_alert(test_alert)
+    return {"status": "ok", "alert": test_alert}
+
+
+@app.get("/api/alerts/summary")
+async def get_alert_summary():
+    with ALERT_LOCK:
+        alerts = list(ALERTS)
+    with STATS_LOCK:
+        stats = dict(STATS)
+
+    by_type = {}
+    by_detector = {}
+    for alert in alerts:
+        t = alert.get("alert_type", "Unknown")
+        d = alert.get("detector", "unknown")
+        by_type[t] = by_type.get(t, 0) + 1
+        by_detector[d] = by_detector.get(d, 0) + 1
+
+    return {
+        "total": len(alerts),
+        "by_severity": {
+            "critical": stats.get("critical", 0),
+            "high": stats.get("high", 0),
+            "medium": stats.get("medium", 0),
+            "low": stats.get("low", 0),
+            "info": stats.get("info", 0),
+        },
+        "by_type": by_type,
+        "by_detector": by_detector,
+        "network_stats": {
+            "packets_captured": stats.get("packets_captured", 0),
+            "flows_analyzed": stats.get("flows_analyzed", 0),
+            "ml_predictions": stats.get("ml_predictions", 0),
+            "attack_count": stats.get("attack_count", 0),
+            "benign_count": stats.get("benign_count", 0),
+        }
+    }
+
+
+@app.get("/api/flows")
+async def get_flow_history(limit: int = 60):
+    return list(FLOW_HISTORY)[-limit:]
+
+
+@app.post("/api/alerts/{alert_id}/acknowledge")
+async def acknowledge_alert(alert_id: str):
+    with ALERT_LOCK:
+        for alert in ALERTS:
+            if alert.get("id") == alert_id or alert.get("alert_id") == alert_id:
+                alert["status"] = "ACKNOWLEDGED"
+                return {"success": True, "alert": alert}
+    return {"success": False, "message": "Alert not found"}
+
+
+@app.get("/api/ioc")
+async def get_ioc_list():
+    blocklist = []
+    if network_engine and hasattr(network_engine, "outbound_detector"):
+        blocklist = list(getattr(network_engine.outbound_detector, "blocked_destinations", set()))
+    return {"ioc_blocklist": blocklist}
+
+
+@app.post("/api/ioc")
+@app.post("/api/ioc/add")
+async def add_ioc(ip: str = None, data: dict = None):
+    target_ip = ip or (data.get("ip") if data else None)
+    if not target_ip:
+        return {"status": "error", "message": "IP address required"}
+
+    if network_engine and hasattr(network_engine, "outbound_detector"):
+        network_engine.outbound_detector.add_ioc(target_ip)
+        blocklist = list(getattr(network_engine.outbound_detector, "blocked_destinations", set()))
+        return {"status": "ok", "message": f"IOC added: {target_ip}", "ioc_blocklist": blocklist}
+    return {"status": "error", "message": "Network engine not initialized"}
+
+
+@app.delete("/api/ioc/{ip}")
+async def remove_ioc(ip: str):
+    if network_engine and hasattr(network_engine, "outbound_detector"):
+        network_engine.outbound_detector.blocked_destinations.discard(ip)
+        blocklist = list(getattr(network_engine.outbound_detector, "blocked_destinations", set()))
+        return {"status": "ok", "message": f"IOC removed: {ip}", "ioc_blocklist": blocklist}
+    return {"status": "error", "message": "Network engine not initialized"}
+
+
+
+# Simulation engine state
+SIMULATION_RUNNING = False
+_sim_thread = None
+
+
+def simulation_worker():
+    """Generates synthetic background flows & periodic attacks for demonstration."""
+    import random
+    global SIMULATION_RUNNING
+
+    sample_ips = ["192.168.1.105", "192.168.1.112", "10.0.0.45", "172.16.0.8", "198.51.100.14"]
+    target_ips = ["192.168.0.102", "192.168.0.1", "10.0.0.1"]
+
+    while SIMULATION_RUNNING:
+        time.sleep(2)
+        pkts = random.randint(15, 60)
+        flows = random.randint(1, 4)
+        is_attack = random.random() < 0.25  # 25% chance of attack flow
+
+        with STATS_LOCK:
+            STATS["packets_captured"] += pkts
+            STATS["flows_analyzed"] += flows
+            STATS["ml_predictions"] += flows
+
+            if is_attack:
+                STATS["attack_count"] += 1
+                STATS["network_alerts"] += 1
+            else:
+                STATS["benign_count"] += 1
+
+        src_ip = random.choice(sample_ips)
+        dst_ip = random.choice(target_ips)
+
+        # Append to flow history
+        FLOW_HISTORY.append({
+            "timestamp": time.time(),
+            "time": datetime.now(timezone.utc).isoformat(),
+            "packets": pkts,
+            "flows": flows,
+            "attacks": 1 if is_attack else 0,
+            "prediction": "ATTACK" if is_attack else "BENIGN",
+            "source_ip": src_ip,
+            "destination_ip": dst_ip,
+        })
+
+        if is_attack:
+            attack_type = random.choice([
+                "DDoS-SYN Flood",
+                "Port Scanning Activity",
+                "SQL Injection Attempt",
+                "Brute Force SSH",
+                "Malicious Outbound Beacon"
+            ])
+            sev = random.choice(["CRITICAL", "HIGH", "MEDIUM"])
+            alert_rec = {
+                "id": f"SIM-{int(time.time()*1000)}",
+                "alert_id": f"SIM-{int(time.time()*1000)}",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "alert_type": attack_type,
+                "title": f"Simulated {attack_type}",
+                "detector": "Simulated_Engine",
+                "severity": sev,
+                "risk_score": 90 if sev == "CRITICAL" else 75,
+                "source_ip": src_ip,
+                "target_ip": dst_ip,
+                "destination_ip": dst_ip,
+                "description": f"Synthetic threat vector ({attack_type}) generated by ARGUS Simulation Mode.",
+                "status": "UNACKNOWLEDGED",
+            }
+            push_alert(alert_rec)
+
+
+@app.post("/api/simulation/toggle")
+async def toggle_simulation():
+    global SIMULATION_RUNNING, _sim_thread
+    SIMULATION_RUNNING = not SIMULATION_RUNNING
+
+    if SIMULATION_RUNNING:
+        if _sim_thread is None or not _sim_thread.is_alive():
+            _sim_thread = threading.Thread(target=simulation_worker, daemon=True, name="argus-sim")
+            _sim_thread.start()
+        return {"status": "ok", "running": True, "message": "Simulation started"}
+    else:
+        return {"status": "ok", "running": False, "message": "Simulation stopped"}
+
+
+@app.get("/api/simulation/status")
+async def get_simulation_status():
+    return {"running": SIMULATION_RUNNING}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# WebSocket — real-time push
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    async with WS_LOCK:
+        WEBSOCKET_CLIENTS.append(websocket)
+    try:
+        # Send initial snapshot
+        with STATS_LOCK:
+            snap = dict(STATS)
+        with ALERT_LOCK:
+            recent = list(ALERTS)[:50]
+        flow_hist = list(FLOW_HISTORY)
+
+        await websocket.send_text(json.dumps({
+            "type": "snapshot",
+            "stats": snap,
+            "alerts": recent,
+            "flow_history": flow_hist,
+        }))
+        # Keep alive — listen for client pings
+        while True:
+            try:
+                msg = await asyncio.wait_for(websocket.receive_text(), timeout=30)
+                if msg == "ping":
+                    await websocket.send_text(json.dumps({"type": "pong"}))
+            except asyncio.TimeoutError:
+                await websocket.send_text(json.dumps({"type": "heartbeat"}))
+    except (WebSocketDisconnect, Exception):
+        pass
+    finally:
+        async with WS_LOCK:
+            if websocket in WEBSOCKET_CLIENTS:
+                WEBSOCKET_CLIENTS.remove(websocket)
+
+
+async def broadcast_update(payload: dict):
+    """Broadcast update to all connected WebSocket clients."""
+    dead = []
+    async with WS_LOCK:
+        for ws in WEBSOCKET_CLIENTS:
+            try:
+                await ws.send_text(json.dumps(payload))
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            WEBSOCKET_CLIENTS.remove(ws)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Background broadcaster task (pushes updates every second)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_last_alert_count = 0
+
+
+async def broadcaster():
+    global _last_alert_count
+    while True:
+        await asyncio.sleep(1)
+        if not WEBSOCKET_CLIENTS:
+            continue
+
+        with STATS_LOCK:
+            stats_snapshot = dict(STATS)
+        with ALERT_LOCK:
+            alert_count = len(ALERTS)
+            if alert_count > _last_alert_count:
+                new_alerts = list(ALERTS)[:alert_count - _last_alert_count]
+            else:
+                new_alerts = []
+            _last_alert_count = alert_count
+            all_alerts_snap = list(ALERTS)[:100]
+
+        flow_hist_snap = list(FLOW_HISTORY)[-30:]
+
+        payload = {
+            "type": "update",
+            "stats": stats_snapshot,
+            "alerts": all_alerts_snap,
+            "new_alerts": new_alerts,
+            "flow_history": flow_hist_snap,
+        }
+        await broadcast_update(payload)
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Startup / shutdown
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.on_event("startup")
+async def startup_event():
+    global _network_thread, _windows_thread
+
+    print("[ARGUS API] Starting detection engines in background threads...")
+
+    # Get interface from environment or use None (auto-detect)
+    interface = os.environ.get("ARGUS_INTERFACE", None)
+
+    _network_thread = threading.Thread(
+        target=start_network_detection,
+        args=(interface,),
+        daemon=True,
+        name="argus-network",
+    )
+    _network_thread.start()
+
+    _windows_thread = threading.Thread(
+        target=start_windows_detection,
+        daemon=True,
+        name="argus-windows",
+    )
+    _windows_thread.start()
+
+    # Start the WebSocket broadcaster
+    asyncio.create_task(broadcaster())
+
+    print("[ARGUS API] Server ready at http://localhost:8000")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    print("[ARGUS API] Shutting down...")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Mount Frontend Static Files at Root
+# ─────────────────────────────────────────────────────────────────────────────
+if FRONTEND_DIR.exists():
+    app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Main
+# ─────────────────────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="ARGUS API Server")
+    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--interface", default=None, help="Network interface (e.g. Wi-Fi)")
+    args = parser.parse_args()
+
+    if args.interface:
+        os.environ["ARGUS_INTERFACE"] = args.interface
+
+    print()
+    print("=" * 70)
+    print("  ARGUS API SERVER")
+    print(f"  http://{args.host}:{args.port}")
+    print("=" * 70)
+    print()
+
+    uvicorn.run(
+        "server:app",
+        host=args.host,
+        port=args.port,
+        reload=False,
+        log_level="warning",
+    )

@@ -1,0 +1,48 @@
+{
+  "model_name": "Random Forest",
+  "task": "binary network attack detection",
+  "sklearn_version": "1.7.2",
+  "features": [
+    "active_max",
+    "active_mean",
+    "active_min",
+    "active_std",
+    "bwd_iat_max",
+    "bwd_iat_mean",
+    "bwd_iat_min",
+    "bwd_iat_std",
+    "bwd_psh_flags",
+    "bwd_urg_flags",
+    "cwe_flag_count",
+    "down_up_ratio",
+    "flow_duration",
+    "flow_iat_max",
+    "flow_iat_mean",
+    "flow_iat_min",
+    "flow_iat_std",
+    "fwd_iat_max",
+    "fwd_iat_mean",
+    "fwd_iat_min",
+    "fwd_iat_std",
+    "fwd_psh_flags",
+    "fwd_urg_flags",
+    "idle_max",
+    "idle_mean",
+    "idle_min",
+    "idle_std"
+  ],
+  "classes": {
+    "0": "BENIGN",
+    "1": "ATTACK"
+  },
+  "random_state": 42,
+  "metrics": {
+    "Model": "Random Forest",
+    "Accuracy": 0.9825,
+    "Precision": 0.9832248372558838,
+    "Recall": 0.98175,
+    "F1": 0.9824868651488616,
+    "ROC_AUC": 0.9984841875,
+    "Train_Time_sec": 1.7071425914764404
+  }
+}

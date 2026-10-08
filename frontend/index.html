@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ARGUS — Real-time Security Dashboard</title>
+  <meta name="description" content="ARGUS — Adaptive Real-time Guard for Unified Security. Live SOC dashboard for network and Windows threat detection." />
+  <link rel="stylesheet" href="style.css" />
+  <!-- Chart.js CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+</head>
+<body>
+
+<div id="app">
+
+  <!-- ═══════════════════════════════════════════════════════════
+       SIDEBAR
+  ═══════════════════════════════════════════════════════════ -->
+  <aside id="sidebar">
+    <div class="logo">
+      <div class="logo-icon">🛡️</div>
+      <div>
+        <div class="logo-text">ARGUS</div>
+        <div class="logo-sub">Threat Detection</div>
+      </div>
+    </div>
+
+    <div class="nav-section">Monitoring</div>
+    <div class="nav-item active" data-view="overview">
+      <span class="nav-icon">📊</span> Overview
+    </div>
+    <div class="nav-item" data-view="alerts">
+      <span class="nav-icon">🚨</span> Alerts
+      <span class="nav-badge" id="sb-alert-count">0</span>
+    </div>
+    <div class="nav-item" data-view="network">
+      <span class="nav-icon">🌐</span> Network
+    </div>
+    <div class="nav-item" data-view="windows">
+      <span class="nav-icon">🪟</span> Windows Events
+    </div>
+
+    <div class="nav-section">Defence</div>
+    <div class="nav-item" data-view="ioc">
+      <span class="nav-icon">🚫</span> IOC Blocklist
+    </div>
+
+    <div style="margin-top: auto; display: flex; flex-direction: column; gap: 8px;">
+      <div class="live-badge">
+        <div class="live-dot"></div>
+        Live Detection Active
+      </div>
+      <div class="conn-status">
+        <div class="conn-dot" id="conn-dot"></div>
+        <span id="conn-label">Connecting…</span>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ═══════════════════════════════════════════════════════════
+       HEADER
+  ═══════════════════════════════════════════════════════════ -->
+  <header id="header">
+    <h1 class="header-title" id="page-title">Security Overview</h1>
+    <div class="header-right">
+      <div id="clock">--:--:--</div>
+      <button class="btn btn-ghost" id="sound-toggle" title="Toggle audio alert sounds"><span id="sound-icon">🔔</span> Sound</button>
+      <button class="btn btn-primary" id="btn-test-alert" title="Emit a test alert to verify pipeline">⚡ Test Alert</button>
+      <button class="btn btn-warning" id="btn-sim-traffic" title="Toggle real-time traffic simulation">🧪 Sim Traffic</button>
+      <button class="btn btn-ghost" id="btn-clear" title="Clear all alerts">🗑 Clear</button>
+    </div>
+  </header>
+
+  <!-- ═══════════════════════════════════════════════════════════
+       MAIN CONTENT
+  ═══════════════════════════════════════════════════════════ -->
+  <main id="main">
+
+    <!-- ── VIEW: OVERVIEW ──────────────────────────────────── -->
+    <div id="view-overview">
+
+      <!-- Stat cards -->
+      <div class="stats-grid" id="stat-cards">
+        <div class="stat-card" data-severity="total">
+          <div class="stat-icon">🚨</div>
+          <div class="stat-label">Total Alerts</div>
+          <div class="stat-value" id="s-total">0</div>
+          <div class="stat-sub">All detected threats</div>
+        </div>
+        <div class="stat-card" data-severity="critical">
+          <div class="stat-icon">🔴</div>
+          <div class="stat-label">Critical</div>
+          <div class="stat-value" id="s-critical">0</div>
+          <div class="stat-sub">Requires immediate action</div>
+        </div>
+        <div class="stat-card" data-severity="high">
+          <div class="stat-icon">🟠</div>
+          <div class="stat-label">High</div>
+          <div class="stat-value" id="s-high">0</div>
+          <div class="stat-sub">High severity threats</div>
+        </div>
+        <div class="stat-card" data-severity="medium">
+          <div class="stat-icon">🟡</div>
+          <div class="stat-label">Medium</div>
+          <div class="stat-value" id="s-medium">0</div>
+          <div class="stat-sub">Medium severity threats</div>
+        </div>
+        <div class="stat-card" data-severity="network">
+          <div class="stat-icon">🌐</div>
+          <div class="stat-label">Network Alerts</div>
+          <div class="stat-value" id="s-network">0</div>
+          <div class="stat-sub">ML + port scan + outbound</div>
+        </div>
+        <div class="stat-card" data-severity="packets">
+          <div class="stat-icon">📦</div>
+          <div class="stat-label">Packets Captured</div>
+          <div class="stat-value" id="s-packets">0</div>
+          <div class="stat-sub" id="s-flows">0 flows analyzed</div>
+        </div>
+      </div>
+
+      <!-- Charts + Status row -->
+      <div class="dash-grid">
+
+        <!-- Network Activity Chart -->
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title">
+              <span class="card-title-icon">📈</span> Network Flow Activity
+            </div>
+            <div style="font-size: 11px; color: var(--text-muted);">Last 60 flows</div>
+          </div>
+          <div class="card-body">
+            <div class="chart-wrap">
+              <canvas id="chart-flows"></canvas>
+            </div>
+          </div>
+        </div>
+
+        <!-- Severity Donut -->
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title">
+              <span class="card-title-icon">🎯</span> Alert Severity Breakdown
+            </div>
+          </div>
+          <div class="card-body" style="display: flex; align-items: center; gap: 20px;">
+            <div style="width: 150px; height: 150px; flex-shrink: 0;">
+              <canvas id="chart-severity"></canvas>
+            </div>
+            <div class="progress-list" style="flex: 1;">
+              <div class="progress-item">
+                <div class="progress-header">
+                  <span class="progress-label" style="color: var(--critical);">Critical</span>
+                  <span class="progress-value" id="p-critical">0</span>
+                </div>
+                <div class="progress-bar"><div class="progress-fill" id="pf-critical" style="background: var(--critical); width: 0%;"></div></div>
+              </div>
+              <div class="progress-item">
+                <div class="progress-header">
+                  <span class="progress-label" style="color: var(--high);">High</span>
+                  <span class="progress-value" id="p-high">0</span>
+                </div>
+                <div class="progress-bar"><div class="progress-fill" id="pf-high" style="background: var(--high); width: 0%;"></div></div>
+              </div>
+              <div class="progress-item">
+                <div class="progress-header">
+                  <span class="progress-label" style="color: var(--medium);">Medium</span>
+                  <span class="progress-value" id="p-medium">0</span>
+                </div>
+                <div class="progress-bar"><div class="progress-fill" id="pf-medium" style="background: var(--medium); width: 0%;"></div></div>
+              </div>
+              <div class="progress-item">
+                <div class="progress-header">
+                  <span class="progress-label" style="color: var(--low);">Low / Info</span>
+                  <span class="progress-value" id="p-low">0</span>
+                </div>
+                <div class="progress-bar"><div class="progress-fill" id="pf-low" style="background: var(--low); width: 0%;"></div></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Detector Status -->
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title">
+              <span class="card-title-icon">⚙️</span> Detector Status
+            </div>
+          </div>
+          <div class="card-body">
+            <div class="detector-grid">
+              <div class="detector-item">
+                <div class="det-dot" id="det-dot-ml"></div>
+                <div class="det-info">
+                  <div class="det-name">Network ML</div>
+                  <div class="det-status">Random Forest</div>
+                </div>
+                <div class="det-count" id="det-count-ml">0</div>
+              </div>
+              <div class="detector-item">
+                <div class="det-dot" id="det-dot-ps"></div>
+                <div class="det-info">
+                  <div class="det-name">Port Scan</div>
+                  <div class="det-status">Threshold: 20 ports</div>
+                </div>
+                <div class="det-count" id="det-count-ps">0</div>
+              </div>
+              <div class="detector-item">
+                <div class="det-dot" id="det-dot-ob"></div>
+                <div class="det-info">
+                  <div class="det-name">Outbound IOC</div>
+                  <div class="det-status">Blocklist matching</div>
+                </div>
+                <div class="det-count" id="det-count-ob">0</div>
+              </div>
+              <div class="detector-item">
+                <div class="det-dot" id="det-dot-win"></div>
+                <div class="det-info">
+                  <div class="det-name">Windows Events</div>
+                  <div class="det-status">Event ID 4625</div>
+                </div>
+                <div class="det-count" id="det-count-win">0</div>
+              </div>
+            </div>
+
+            <!-- ML stats -->
+            <div style="margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border);">
+              <div style="font-size: 11px; color: var(--text-muted); margin-bottom: 10px; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600;">ML Predictions</div>
+              <div style="display: flex; gap: 20px;">
+                <div>
+                  <div style="font-family: 'JetBrains Mono', monospace; font-size: 22px; font-weight: 800; color: var(--low);" id="ml-benign">0</div>
+                  <div style="font-size: 11px; color: var(--text-muted);">Benign flows</div>
+                </div>
+                <div>
+                  <div style="font-family: 'JetBrains Mono', monospace; font-size: 22px; font-weight: 800; color: var(--critical);" id="ml-attack">0</div>
+                  <div style="font-size: 11px; color: var(--text-muted);">Attack flows</div>
+                </div>
+                <div>
+                  <div style="font-family: 'JetBrains Mono', monospace; font-size: 22px; font-weight: 800; color: var(--info);" id="ml-total">0</div>
+                  <div style="font-size: 11px; color: var(--text-muted);">Total flows</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Activity Feed -->
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title">
+              <span class="card-title-icon">📡</span> Live Activity Feed
+            </div>
+            <div id="feed-count" style="font-size: 11px; color: var(--text-muted);">0 events</div>
+          </div>
+          <div class="feed-list" id="activity-feed">
+            <div class="empty-state">
+              <div class="empty-icon">📡</div>
+              <p>Waiting for activity…</p>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Recent Alerts mini -->
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">
+            <span class="card-title-icon">🚨</span> Recent Alerts
+          </div>
+          <button class="btn btn-ghost" style="font-size: 12px;" onclick="showView('alerts')">View All →</button>
+        </div>
+        <div class="alerts-section">
+          <div class="alert-row header">
+            <div>Severity</div>
+            <div>Alert Type</div>
+            <div>Source IP</div>
+            <div>Timestamp</div>
+            <div>Status</div>
+            <div></div>
+          </div>
+          <div class="alerts-list" id="mini-alerts-list" style="max-height: 280px;">
+            <div class="empty-state">
+              <div class="empty-icon">🔒</div>
+              <p>No alerts yet — system is monitoring</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div><!-- /view-overview -->
+
+
+    <!-- ── VIEW: ALERTS ────────────────────────────────────── -->
+    <div id="view-alerts" style="display: none;">
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">
+            <span class="card-title-icon">🚨</span> All Security Alerts
+          </div>
+          <div id="alert-total-label" style="font-size: 13px; color: var(--text-secondary); font-weight: 600;">0 alerts</div>
+        </div>
+        <div class="alerts-section">
+          <div class="alerts-toolbar">
+            <button class="filter-btn active" data-sev="ALL">All</button>
+            <button class="filter-btn" data-sev="CRITICAL">🔴 Critical</button>
+            <button class="filter-btn" data-sev="HIGH">🟠 High</button>
+            <button class="filter-btn" data-sev="MEDIUM">🟡 Medium</button>
+            <button class="filter-btn" data-sev="LOW">🟢 Low</button>
+            <div class="search-box">
+              <span class="search-icon">🔍</span>
+              <input type="text" id="alert-search" placeholder="Search alerts…" />
+            </div>
+          </div>
+          <div class="alert-row header">
+            <div>Severity</div>
+            <div>Alert Type</div>
+            <div>Source IP</div>
+            <div>Timestamp</div>
+            <div>Status</div>
+            <div></div>
+          </div>
+          <div class="alerts-list" id="full-alerts-list">
+            <div class="empty-state">
+              <div class="empty-icon">🔒</div>
+              <p>No alerts yet — system is monitoring</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div><!-- /view-alerts -->
+
+
+    <!-- ── VIEW: NETWORK ───────────────────────────────────── -->
+    <div id="view-network" style="display: none;">
+      <div class="stats-grid" style="grid-template-columns: repeat(3, 1fr);">
+        <div class="stat-card" data-severity="packets">
+          <div class="stat-icon">📦</div>
+          <div class="stat-label">Packets Captured</div>
+          <div class="stat-value" id="n-packets">0</div>
+        </div>
+        <div class="stat-card" data-severity="network">
+          <div class="stat-icon">🔄</div>
+          <div class="stat-label">Flows Analyzed</div>
+          <div class="stat-value" id="n-flows">0</div>
+        </div>
+        <div class="stat-card" data-severity="total">
+          <div class="stat-icon">🤖</div>
+          <div class="stat-label">ML Predictions</div>
+          <div class="stat-value" id="n-ml">0</div>
+        </div>
+      </div>
+
+      <div class="dash-grid">
+        <div class="card" style="grid-column: 1 / -1;">
+          <div class="card-header">
+            <div class="card-title">
+              <span class="card-title-icon">📈</span> Attack vs Benign — Flow Timeline
+            </div>
+          </div>
+          <div class="card-body">
+            <div class="chart-wrap" style="height: 260px;">
+              <canvas id="chart-timeline"></canvas>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title">
+              <span class="card-title-icon">🤖</span> ML Detection Results
+            </div>
+          </div>
+          <div class="card-body" style="display: flex; align-items: center; gap: 20px;">
+            <div style="width: 160px; height: 160px; flex-shrink: 0;">
+              <canvas id="chart-ml-ratio"></canvas>
+            </div>
+            <div style="flex: 1;">
+              <div style="margin-bottom: 12px;">
+                <div style="font-size: 11px; color: var(--text-muted); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.06em;">Attack Flows</div>
+                <div style="font-size: 32px; font-weight: 800; color: var(--critical); font-family: 'JetBrains Mono', monospace;" id="net-attack">0</div>
+              </div>
+              <div>
+                <div style="font-size: 11px; color: var(--text-muted); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.06em;">Benign Flows</div>
+                <div style="font-size: 32px; font-weight: 800; color: var(--low); font-family: 'JetBrains Mono', monospace;" id="net-benign">0</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title">
+              <span class="card-title-icon">📋</span> Recent Flow Events
+            </div>
+          </div>
+          <div class="feed-list" id="flow-feed" style="max-height: 260px;">
+            <div class="empty-state">
+              <div class="empty-icon">🌐</div>
+              <p>No flows captured yet</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div><!-- /view-network -->
+
+
+    <!-- ── VIEW: WINDOWS ───────────────────────────────────── -->
+    <div id="view-windows" style="display: none;">
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">
+            <span class="card-title-icon">🪟</span> Windows Security Events
+          </div>
+          <div style="font-size: 12px; color: var(--text-muted);">Monitoring Event ID 4625 — Failed Logins</div>
+        </div>
+        <div class="card-body">
+          <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 20px;">
+            <div class="stat-card" data-severity="total">
+              <div class="stat-icon">🚨</div>
+              <div class="stat-label">Windows Alerts</div>
+              <div class="stat-value" id="win-alerts">0</div>
+            </div>
+            <div class="stat-card" data-severity="critical">
+              <div class="stat-icon">🔑</div>
+              <div class="stat-label">Brute Force</div>
+              <div class="stat-value" id="win-bruteforce">0</div>
+            </div>
+            <div class="stat-card" data-severity="high">
+              <div class="stat-icon">👤</div>
+              <div class="stat-label">Unique Users</div>
+              <div class="stat-value" id="win-users">0</div>
+            </div>
+          </div>
+
+          <p class="section-title">Windows Security Alerts</p>
+          <div class="alert-row header">
+            <div>Severity</div>
+            <div>Alert Type</div>
+            <div>Source IP</div>
+            <div>Timestamp</div>
+            <div>Status</div>
+            <div></div>
+          </div>
+          <div class="alerts-list" id="win-alerts-list" style="max-height: 400px;">
+            <div class="empty-state">
+              <div class="empty-icon">✅</div>
+              <p>No Windows security alerts — system is clean</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div><!-- /view-windows -->
+
+
+    <!-- ── VIEW: IOC ───────────────────────────────────────── -->
+    <div id="view-ioc" style="display: none;">
+      <div class="dash-grid">
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title">
+              <span class="card-title-icon">🚫</span> IOC Blocklist
+            </div>
+            <div id="ioc-count" style="font-size: 13px; color: var(--critical); font-weight: 600;">0 IOCs</div>
+          </div>
+          <div class="ioc-form">
+            <input class="ioc-input" type="text" id="ioc-input" placeholder="Enter IP address (e.g. 192.168.1.100)" />
+            <button class="btn btn-danger" id="btn-add-ioc">
+              🚫 Block IP
+            </button>
+          </div>
+          <div class="ioc-list" id="ioc-list">
+            <div class="ioc-empty">No IPs blocked yet. Add malicious IPs to block outbound connections.</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title">
+              <span class="card-title-icon">📖</span> How IOC Detection Works
+            </div>
+          </div>
+          <div class="card-body" style="display: flex; flex-direction: column; gap: 14px;">
+            <div style="background: var(--bg-glass); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 14px;">
+              <div style="font-size: 13px; font-weight: 600; margin-bottom: 6px; color: var(--accent-light);">🌐 Outbound Connection Monitoring</div>
+              <div style="font-size: 12px; color: var(--text-secondary); line-height: 1.6;">Every packet's destination IP is checked against the blocklist in real-time. A match triggers an immediate HIGH severity alert.</div>
+            </div>
+            <div style="background: var(--bg-glass); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 14px;">
+              <div style="font-size: 13px; font-weight: 600; margin-bottom: 6px; color: var(--high);">📡 Port Scan Detection</div>
+              <div style="font-size: 12px; color: var(--text-secondary); line-height: 1.6;">If a source IP connects to 20+ unique ports within 60 seconds, a port scan alert is raised with HIGH severity.</div>
+            </div>
+            <div style="background: var(--bg-glass); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 14px;">
+              <div style="font-size: 13px; font-weight: 600; margin-bottom: 6px; color: var(--medium);">🤖 ML Network Analysis</div>
+              <div style="font-size: 12px; color: var(--text-secondary); line-height: 1.6;">Network flows are analyzed by a Random Forest model (98.25% accuracy) trained on CIC-IDS2017/2018 features. Attacks flagged with CRITICAL/HIGH severity.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div><!-- /view-ioc -->
+
+  </main>
+</div>
+
+<!-- Toast container -->
+<div id="toast-container"></div>
+
+<!-- Alert Detail Modal -->
+<div id="modal-overlay" class="modal-overlay" style="display: none;">
+  <div class="modal-card">
+    <div class="modal-header">
+      <div class="modal-title" id="modal-title">🚨 Threat Alert Details</div>
+      <button class="modal-close" id="modal-close">&times;</button>
+    </div>
+    <div class="modal-body" id="modal-body"></div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

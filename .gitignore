@@ -1,0 +1,28 @@
+# Python & Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Environments
+venv/
+.venv/
+env/
+ENV/
+
+# Logs & Temporary Test Output
+*.log
+test_windows_out.txt
+test_windows_err.txt
+backend/test_windows_out.txt
+backend/test_windows_err.txt
+
+# IDEs & System
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Large Data & Artifacts
+*.pcap
+*.csv.gz
