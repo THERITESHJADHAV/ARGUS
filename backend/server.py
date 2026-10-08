@@ -89,6 +89,8 @@ FLOW_HISTORY: deque = deque(maxlen=60)
 # Active WebSocket connections
 WEBSOCKET_CLIENTS: List[WebSocket] = []
 WS_LOCK = asyncio.Lock()
+MAIN_EVENT_LOOP: Optional[asyncio.AbstractEventLoop] = None
+_broadcaster_task: Optional[asyncio.Task] = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -96,7 +98,7 @@ WS_LOCK = asyncio.Lock()
 # ─────────────────────────────────────────────────────────────────────────────
 
 def push_alert(alert_dict: dict):
-    """Add alert to global store and update stats."""
+    """Add alert to global store, update stats, and push instant WebSocket notification."""
     with ALERT_LOCK:
         ALERTS.appendleft(alert_dict)
 
@@ -105,6 +107,20 @@ def push_alert(alert_dict: dict):
         sev = alert_dict.get("severity", "info").lower()
         if sev in STATS:
             STATS[sev] += 1
+        stats_snap = dict(STATS)
+
+    if MAIN_EVENT_LOOP and MAIN_EVENT_LOOP.is_running():
+        try:
+            asyncio.run_coroutine_threadsafe(
+                broadcast_update({
+                    "type": "alert",
+                    "alert": alert_dict,
+                    "stats": stats_snap
+                }),
+                MAIN_EVENT_LOOP
+            )
+        except Exception:
+            pass
 
 
 class InstrumentedNetworkEngine(NetworkDetectionEngine):
@@ -777,8 +793,9 @@ async def broadcaster():
 
 @app.on_event("startup")
 async def startup_event():
-    global _network_thread, _windows_thread
+    global _network_thread, _windows_thread, MAIN_EVENT_LOOP, _broadcaster_task
 
+    MAIN_EVENT_LOOP = asyncio.get_running_loop()
     print("[ARGUS API] Starting detection engines in background threads...")
 
     # Get interface from environment or use None (auto-detect)
@@ -799,8 +816,8 @@ async def startup_event():
     )
     _windows_thread.start()
 
-    # Start the WebSocket broadcaster
-    asyncio.create_task(broadcaster())
+    # Start and anchor the persistent WebSocket broadcaster
+    _broadcaster_task = asyncio.create_task(broadcaster())
 
     print("[ARGUS API] Server ready at http://localhost:8000")
 
