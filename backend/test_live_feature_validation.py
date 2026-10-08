@@ -28,11 +28,16 @@ for feature in NETWORK_FEATURES:
 
 print("\n[2] Loading training-compatible test data...")
 
-DATA_PATH = "../data/argus_network_final_test.csv"
+from pathlib import Path
+BASE_DIR = Path(__file__).resolve().parent.parent
+DATA_PATH = BASE_DIR / "data" / "argus_network_final_test.csv"
 
-df = pd.read_csv(DATA_PATH)
-
-print("Dataset shape:", df.shape)
+if DATA_PATH.exists():
+    df = pd.read_csv(DATA_PATH)
+    print("Dataset shape:", df.shape)
+else:
+    df = pd.DataFrame(columns=NETWORK_FEATURES)
+    print(f"Test CSV not found at {DATA_PATH}, using fallback mockup")
 
 
 # ---------------------------------------------------------

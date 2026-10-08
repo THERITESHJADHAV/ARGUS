@@ -74,9 +74,8 @@ def handle_event(event):
         )
 
 
-collector = NetworkCollector(
-    callback=handle_event
-)
-
-
-collector.start()
+if __name__ == "__main__":
+    collector = NetworkCollector(
+        callback=handle_event
+    )
+    collector.start()

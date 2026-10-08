@@ -8,9 +8,8 @@ MODEL_PATH = (
 )
 
 
-detector = LiveNetworkDetector(
-    model_path=MODEL_PATH
-)
-
-
-detector.start()
+if __name__ == "__main__":
+    detector = LiveNetworkDetector(
+        model_path=MODEL_PATH
+    )
+    detector.start()
