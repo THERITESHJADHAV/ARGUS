@@ -49,15 +49,36 @@ class WindowsDetectionEngine:
         )
 
         # -------------------------------------------------
-        # Statistics
+        # Statistics & Deduplication
         # -------------------------------------------------
 
         self.events_processed = 0
         self.alerts_generated = 0
+        self.processed_record_ids = set()
+
+        # Watermark existing historical events so ARGUS only detects NEW events in real-time
+        self.seed_baseline()
 
         print(
             "[ARGUS] Windows detection engine initialized."
         )
+
+
+    # =====================================================
+    # SEED BASELINE (WATERMARK HISTORICAL EVENTS)
+    # =====================================================
+
+    def seed_baseline(self):
+        """Mark existing historical events as already processed so ARGUS only detects NEW events."""
+        try:
+            events = self.collector.get_failed_login_events(max_events=100)
+            for event in events:
+                rid = event.get("RecordId")
+                if rid:
+                    self.processed_record_ids.add(rid)
+            print(f"[ARGUS] Windows baseline: {len(self.processed_record_ids)} historical Security event(s) watermarked.")
+        except Exception:
+            pass
 
 
     # =====================================================
@@ -162,11 +183,19 @@ class WindowsDetectionEngine:
 
     def scan_once(self):
         events = self.collector.get_failed_login_events(max_events=50)
+        new_count = 0
         if events:
-            print(f"[ARGUS] Windows Security log: {len(events)} event(s) retrieved.")
             for event in events:
+                rid = event.get("RecordId")
+                if rid and rid in self.processed_record_ids:
+                    continue
+                if rid:
+                    self.processed_record_ids.add(rid)
                 self.process_event(event)
-        return len(events)
+                new_count += 1
+            if new_count > 0:
+                print(f"[ARGUS] Windows Security log: {new_count} new event(s) processed.")
+        return new_count
 
 
     # =====================================================

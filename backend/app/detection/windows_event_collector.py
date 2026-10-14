@@ -163,13 +163,6 @@ catch {{
 
             data = [data]
 
-
-        print(
-            f"[ARGUS] Retrieved "
-            f"{len(data)} failed-login event(s)."
-        )
-
-
         return data
 
     # =====================================================

@@ -79,7 +79,6 @@ $events |
             return []
 
         if output == "ARGUS_NO_EVENTS":
-            print("[ARGUS] No Sysmon process events found.")
             return []
 
         try:
@@ -95,9 +94,4 @@ $events |
         if isinstance(data, dict):
             data = [data]
 
-        print(
-            f"[ARGUS] Retrieved "
-            f"{len(data)} Sysmon process event(s)."
-        )
-
-        return data
+        return data

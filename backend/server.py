@@ -284,6 +284,24 @@ class InstrumentedWindowsEngine(WindowsDetectionEngine):
         self.sysmon_parser = SysmonEventParser()
         self.sysmon_process_detector = SuspiciousProcessDetector()
         self.processed_ps_ids = set()
+        self.processed_sysmon_ids = set()
+
+        # Watermark historical PowerShell & Sysmon events so only live events generate alerts
+        try:
+            for ev in self.collector.get_powershell_events(max_events=50):
+                rid = ev.get("RecordId")
+                if rid:
+                    self.processed_ps_ids.add(rid)
+        except Exception:
+            pass
+
+        try:
+            for ev in self.sysmon_collector.get_process_events(max_events=50):
+                rid = ev.get("RecordId")
+                if rid:
+                    self.processed_sysmon_ids.add(rid)
+        except Exception:
+            pass
 
     def process_event(self, event):
         result = super().process_event(event)
@@ -367,6 +385,12 @@ class InstrumentedWindowsEngine(WindowsDetectionEngine):
         try:
             sys_events = self.sysmon_collector.get_process_events(max_events=20)
             for ev in sys_events:
+                rec_id = ev.get("RecordId")
+                if rec_id and rec_id in self.processed_sysmon_ids:
+                    continue
+                if rec_id:
+                    self.processed_sysmon_ids.add(rec_id)
+
                 parsed = self.sysmon_parser.parse(ev)
                 if not parsed:
                     continue
@@ -589,6 +613,91 @@ async def remove_ioc(ip: str):
         blocklist = list(getattr(network_engine.outbound_detector, "blocked_destinations", set()))
         return {"status": "ok", "message": f"IOC removed: {ip}", "ioc_blocklist": blocklist}
     return {"status": "error", "message": "Network engine not initialized"}
+
+
+@app.post("/api/events/process")
+async def ingest_process_event(data: dict):
+    """
+    Ingest and analyze a Process Creation event using ARGUS SuspiciousProcessDetector.
+    If suspicious (score >= 30), generates a SUSPICIOUS_PROCESS alert and broadcasts to the dashboard.
+    """
+    detector = None
+    if windows_engine and hasattr(windows_engine, "sysmon_process_detector"):
+        detector = windows_engine.sysmon_process_detector
+    else:
+        detector = SuspiciousProcessDetector()
+
+    proc_res = detector.process_event(data)
+    if proc_res.get("alert"):
+        with STATS_LOCK:
+            STATS["windows_alerts"] += 1
+        aid = f"SYS-{int(time.time()*1000)}"
+        alert_rec = {
+            "id": aid,
+            "alert_id": aid,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "type": "SUSPICIOUS_PROCESS",
+            "alert_type": "Suspicious Process Execution",
+            "title": f"Suspicious Process {proc_res.get('process_name')}",
+            "detector": "process_detector",
+            "severity": proc_res.get("severity", "HIGH"),
+            "risk_score": proc_res.get("risk_score", 75),
+            "source_ip": "127.0.0.1",
+            "target_ip": "localhost",
+            "user": proc_res.get("user") or "SYSTEM",
+            "process_name": proc_res.get("process_name"),
+            "image": proc_res.get("image"),
+            "command_line": proc_res.get("command_line"),
+            "parent_image": proc_res.get("parent_image"),
+            "reasons": proc_res.get("reasons", []),
+            "description": f"Suspicious process execution detected: {proc_res.get('image')}. Reasons: {', '.join(proc_res.get('reasons', []))}",
+            "status": "UNACKNOWLEDGED",
+        }
+        push_alert(alert_rec)
+        return {"status": "alert", "alert": alert_rec, "result": proc_res}
+    return {"status": "normal", "result": proc_res}
+
+
+@app.post("/api/events/powershell")
+async def ingest_powershell_event(data: dict):
+    """
+    Ingest and analyze a PowerShell command event using ARGUS PowerShellDetector.
+    If suspicious, generates a SUSPICIOUS_POWERSHELL alert and broadcasts to the dashboard.
+    """
+    detector = None
+    if windows_engine and hasattr(windows_engine, "powershell_detector"):
+        detector = windows_engine.powershell_detector
+    else:
+        detector = PowerShellDetector()
+
+    ps_result = detector.process_event(data)
+    if ps_result.get("alert"):
+        with STATS_LOCK:
+            STATS["windows_alerts"] += 1
+        aid = f"PS-{int(time.time()*1000)}"
+        cmdline = data.get("command_line", "")
+        alert_rec = {
+            "id": aid,
+            "alert_id": aid,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "type": "SUSPICIOUS_POWERSHELL",
+            "alert_type": "Suspicious PowerShell Command",
+            "title": f"Suspicious PowerShell Execution ({ps_result.get('severity')})",
+            "detector": "powershell_detector",
+            "severity": ps_result.get("severity", "HIGH"),
+            "risk_score": ps_result.get("risk_score", 70),
+            "source_ip": "127.0.0.1",
+            "target_ip": "localhost",
+            "user": ps_result.get("user") or "System",
+            "process_name": "powershell.exe",
+            "command_line": cmdline[:500],
+            "reasons": ps_result.get("reasons", []),
+            "description": f"Suspicious PowerShell command executed: {cmdline[:200]}. Reasons: {', '.join(ps_result.get('reasons', []))}",
+            "status": "UNACKNOWLEDGED",
+        }
+        push_alert(alert_rec)
+        return {"status": "alert", "alert": alert_rec, "result": ps_result}
+    return {"status": "normal", "result": ps_result}
 
 
 

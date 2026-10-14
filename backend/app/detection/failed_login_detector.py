@@ -116,6 +116,9 @@ class FailedLoginDetector:
 
         if failure_count >= self.failure_threshold:
 
+            # Reset attempts window for this key to prevent infinite loop of alerts
+            self.failed_attempts[key].clear()
+
             return {
 
                 "alert": True,
